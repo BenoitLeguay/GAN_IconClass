@@ -127,3 +127,9 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+data/models/
+.ipynb_checkpoints/
+__pycache__/
+runs/
+iconclass.sqlite
