@@ -117,7 +117,7 @@ class WGAN:
 
         return generator_loss.item()
 
-    def train(self, n_epoch, dataloader, n_critic_update=1, n_generator_update=1):
+    def train(self, n_epoch, dataloader, n_critic_update=1, n_generator_update=1, gan_id=None):
 
         assert n_critic_update > 0 and n_generator_update > 0, "n_update must be greater than 0"
 
@@ -143,12 +143,13 @@ class WGAN:
                     fake_grid = ut.return_tensor_images(fake)
                     real_grid = ut.return_tensor_images(real)
 
-                    self.writer.add_image(f'{self.step/len(dataloader)}/Fake', fake_grid)
-                    self.writer.add_image(f'{self.step/len(dataloader)}/Real', real_grid)
+                    image_id = int(self.step/len(dataloader))
+                    self.writer.add_image(f'{image_id}/Fake', fake_grid)
+                    self.writer.add_image(f'{image_id}/Real', real_grid)
 
                 self.step += 1
-
-        self.save_model()
+        if gan_id:
+            self.save_model(gan_id)
 
     def compute_critic_accuracy(self, critic_fake_pred, critic_real_pred):
         fake_label = critic_fake_pred < .5
@@ -157,7 +158,7 @@ class WGAN:
         self.writer.add_scalar('Accuracy/Critic/Fake', float(fake_label.sum()/len(fake_label)), self.step)
         self.writer.add_scalar('Accuracy/Critic/Real', float(real_label.sum()/len(real_label)), self.step)
 
-    def save_model(self):
+    def save_model(self, gan_id):
         torch.save({
             'step': self.step,
             'z_dim': self.z_dim,
@@ -168,7 +169,7 @@ class WGAN:
             'generator_optim_state_dict': self.gen_optim.state_dict(),
             'critic_optim_state_dict': self.critic_optim.state_dict()
         },
-            f"data/WGAN_n_update_{self.step}.pth")
+            f"data/models/{gan_id}.pth")
 
     def load_model(self, path, train=True):
         checkpoint = torch.load(path)
