@@ -1,3 +1,4 @@
+Alphabet classifier.ipynb
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -133,3 +134,4 @@ data/models/
 __pycache__/
 runs/
 iconclass.sqlite
+.idea/

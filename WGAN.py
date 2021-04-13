@@ -17,11 +17,16 @@ class WGAN:
         Avoiding Sparse Gradient using LeakyRelu
 
     TO DO
+        Data Augmentation
+        ColourPicker
+        add Gaussian Noise to Critic Layers
         Experience Replay (past fake AND swap to older G and D version during training)
     """
     def __init__(self, params, normal_weight_init=True):
-        self.critic = Critic(params["critic"]["n_feature"], params["critic"]["n_channel"]).to(var.device)
-        self.generator = Generator(params["z_dim"], params["gen"]["n_feature"], params["gen"]["n_channel"]).to(var.device)
+        self.critic = Critic(params["critic"]["n_feature"], params["critic"]["n_channel"],
+                             params["n_conv_block"]).to(var.device)
+        self.generator = Generator(params["z_dim"], params["gen"]["n_feature"],
+                                   params["gen"]["n_channel"], params["n_conv_block"]).to(var.device)
 
         self.critic_optim = torch.optim.Adam(self.critic.parameters(),
                                              lr=params['critic']['lr'],
@@ -39,8 +44,8 @@ class WGAN:
         self.step = 0
 
         if normal_weight_init:
-            self.critic.apply(weights_init)
-            self.generator.apply(weights_init)
+            self.critic.apply(ut.weights_init)
+            self.generator.apply(ut.weights_init)
 
     def init_tensorboard(self, main_dir='runs', subdir='train', port=8008):
         os.system(f'tensorboard --logdir={main_dir} --port={port} &')
@@ -192,43 +197,90 @@ class WGAN:
             self.critic.eval()
 
 
-class Generator(nn.Module):
-    def __init__(self, n_latent, n_features, n_channel):
-        super(Generator, self).__init__()
+class Critic(nn.Module):
+    def __init__(self, n_features, n_channel, n_conv_block=3):
+        super(Critic, self).__init__()
+
+        modules = list()
+        for layer in range(n_conv_block):
+            modules.append(ut.critic_layer(n_features * (2 ** layer)))
+
         self.main = nn.Sequential(
-            # input is Z, going into a convolution
-            nn.ConvTranspose2d(n_latent, n_features * 8, 4, 1, 0, bias=False),
-            nn.BatchNorm2d(n_features * 8),
-            nn.Dropout(0.5),
-            nn.ReLU(True),
-            # state size. (n_features*8) x 4 x 4
-            nn.ConvTranspose2d(n_features * 8, n_features * 4, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(n_features * 4),
-            nn.Dropout(0.5),
-            nn.ReLU(True),
-            # state size. (n_features*4) x 8 x 8
-            nn.ConvTranspose2d(n_features * 4, n_features * 2, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(n_features * 2),
-            nn.Dropout(0.5),
-            nn.ReLU(True),
-            # state size. (n_features*2) x 16 x 16
-            nn.ConvTranspose2d(n_features * 2, n_features, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(n_features),
-            nn.Dropout(0.5),
-            nn.ReLU(True),
-            # state size. (n_features) x 32 x 32
-            nn.ConvTranspose2d(n_features, n_channel, 4, 2, 1, bias=False),
-            nn.Tanh()
-            # state size. (n_channel) x 64 x 64
+            nn.Conv2d(n_channel, n_features, 4, 2, 1, bias=False),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Sequential(*modules),  # convolution blocks
+            nn.Conv2d(n_features * (2 ** n_conv_block), 1, 4, 1, 0, bias=False),
+            nn.Sigmoid()
         )
 
     def forward(self, x):
         return self.main(x)
 
 
-class Critic(nn.Module):
+class Generator(nn.Module):
+    def __init__(self, n_latent, n_features, n_channel, n_conv_block=3):
+        super(Generator, self).__init__()
+
+        modules = list()
+        for layer in reversed(range(n_conv_block)):
+            modules.append(ut.generator_layer(n_features * (2 ** layer)))
+
+        self.main = nn.Sequential(
+            nn.ConvTranspose2d(n_latent, n_features * (2 ** n_conv_block), 4, 1, 0, bias=False),
+            nn.BatchNorm2d(n_features * (2 ** n_conv_block)),
+            nn.Dropout(0.5),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Sequential(*modules),  # convolution blocks
+            nn.ConvTranspose2d(n_features, n_channel, 4, 2, 1, bias=False),
+            nn.Tanh()
+        )
+
+    def forward(self, x):
+        return self.main(x)
+
+
+class Generatorx128(nn.Module):
+    def __init__(self, n_latent, n_features, n_channel):
+        super(Generatorx128, self).__init__()
+        self.main = nn.Sequential(
+            # input is Z, going into a convolution
+            nn.ConvTranspose2d(n_latent, n_features * 16, 4, 1, 0, bias=False),
+            nn.BatchNorm2d(n_features * 16),
+            nn.Dropout(0.5),
+            nn.LeakyReLU(0.2, inplace=True),
+            # state size. (n_features*8) x 4 x 4
+            nn.ConvTranspose2d(n_features * 16, n_features * 8, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(n_features * 8),
+            nn.Dropout(0.5),
+            nn.LeakyReLU(0.2, inplace=True),
+            # state size. (n_features*4) x 8 x 8
+            nn.ConvTranspose2d(n_features * 8, n_features * 4, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(n_features * 4),
+            nn.Dropout(0.5),
+            nn.LeakyReLU(0.2, inplace=True),
+            # state size. (n_features*2) x 16 x 16
+            nn.ConvTranspose2d(n_features * 4, n_features * 2, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(n_features * 2),
+            nn.Dropout(0.5),
+            nn.LeakyReLU(0.2, inplace=True),
+            # state size. (n_features*2) x 32 x 32
+            nn.ConvTranspose2d(n_features * 2, n_features, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(n_features),
+            nn.Dropout(0.5),
+            nn.LeakyReLU(0.2, inplace=True),
+            # state size. (n_features) x 64 x 64
+            nn.ConvTranspose2d(n_features, n_channel, 4, 2, 1, bias=False),
+            nn.Tanh()
+            # state size. (n_channel) x 128 x 128
+        )
+
+    def forward(self, x):
+        return self.main(x)
+
+
+class Criticx128(nn.Module):
     def __init__(self, n_features, n_channel):
-        super(Critic, self).__init__()
+        super(Criticx128, self).__init__()
         self.main = nn.Sequential(
             # input is (n_channel) x 64 x 64
             nn.Conv2d(n_channel, n_features, 4, 2, 1, bias=False),
@@ -245,19 +297,15 @@ class Critic(nn.Module):
             nn.Conv2d(n_features * 4, n_features * 8, 4, 2, 1, bias=False),
             nn.BatchNorm2d(n_features * 8),
             nn.LeakyReLU(0.2, inplace=True),
+            # state size. (n_features*4) x 8 x 8
+            nn.Conv2d(n_features * 8, n_features * 16, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(n_features * 16),
+            nn.LeakyReLU(0.2, inplace=True),
             # state size. (n_features*8) x 4 x 4
-            nn.Conv2d(n_features * 8, 1, 4, 1, 0, bias=False),
+            nn.Conv2d(n_features * 16, 1, 4, 1, 0, bias=False),
             nn.Sigmoid()
         )
 
     def forward(self, x):
         return self.main(x)
 
-
-def weights_init(m):
-    classname = m.__class__.__name__
-    if classname.find('Conv') != -1:
-        nn.init.normal_(m.weight.data, 0.0, 0.02)
-    elif classname.find('BatchNorm') != -1:
-        nn.init.normal_(m.weight.data, 1.0, 0.02)
-        nn.init.constant_(m.bias.data, 0)
