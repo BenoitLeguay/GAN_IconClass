@@ -3,9 +3,9 @@ from torch import nn
 import utils as ut
 import variable as var
 from tqdm import tqdm
-import matplotlib.pyplot as plt
 import os
 from torch.utils.tensorboard import SummaryWriter
+from frechet_inception_distance import InceptionV3, calculate_fid
 
 
 class AuxGAN:
@@ -19,22 +19,34 @@ class AuxGAN:
                                        params["gen"]["n_channel"],
                                        n_conv_block=params["n_conv_block"]).to(var.device)
         self.disc_optim = torch.optim.Adam(self.discriminator.parameters(), lr=params['disc']['lr'],
-                                           betas=params['disc']['betas'])
+                                           betas=tuple(params['disc']['betas'].values()))
         self.gen_optim = torch.optim.Adam(self.generator.parameters(), lr=params['gen']['lr'],
-                                          betas=params['gen']['betas'])
+                                          betas=tuple(params['gen']['betas'].values()))
         self.z_dim = params['z_dim']
         self.n_classes = params["n_classes"]
 
+        self.inception = InceptionV3()
+
         self.writer = None
+        self.h_params_added = False
         self.step = 0
 
         if normal_weight_init:
             self.discriminator.apply(ut.weights_init)
             self.generator.apply(ut.weights_init)
 
+        params['GAN_type'] = self.__class__.__name__
+        params['gen_optim_type'] = self.gen_optim.__class__.__name__
+        params['disc_optim_type'] = self.disc_optim.__class__.__name__
+
+        self.params = ut.flatten_dict(params)
+
     def init_tensorboard(self, main_dir='runs', subdir='train', port=8008):
         os.system(f'tensorboard --logdir={main_dir} --port={port} &')
         self.writer = SummaryWriter(f'{main_dir}/{subdir}')
+        if not self.h_params_added:
+            self.writer.add_hparams(self.params, {})
+            self.h_params_added = True
 
     def get_random_noise(self, n):
         return torch.randn(n, self.z_dim, 1, 1, device=var.device)
@@ -45,7 +57,7 @@ class AuxGAN:
     def generate_fake(self, n, train=True, being_class=None):
         noise = self.get_random_noise(n)
         if being_class:
-            classes = torch.ones((n, )).long() * being_class
+            classes = torch.ones((n, ), device=var.device).long() * being_class
         else:
             classes = self.get_random_classes(n)
 
@@ -70,6 +82,8 @@ class AuxGAN:
         real_loss.backward()
 
         disc_loss = (fake_loss + real_loss) / 2
+
+        self.compute_discriminator_accuracy(real_adv, real_aux, fake_adv, fake_aux, real_classes, fake_classes)
 
         return disc_loss
 
@@ -105,24 +119,42 @@ class AuxGAN:
                 self.writer.add_scalar('Loss/Train/Generator', gen_loss, self.step)
 
                 if i_batch == 0:
-                    fake, classes = self.generate_fake(10, train=False)
+                    viz_id = int(self.step / len(dataloader))
 
-                    image_id = int(self.step / len(dataloader))
-                    self.writer.add_image(f'{image_id}/Fake', ut.return_tensor_images(fake))
-                    self.writer.add_image(f'{image_id}/Real', ut.return_tensor_images(real))
+                    fake, classes = self.generate_fake(cur_batch_size, train=False)
+
+                    fid = calculate_fid(real.detach(), fake, self.inception, resize=(75, 75))
+                    self.writer.add_scalar('FID', fid, viz_id)
+
+                    self.writer.add_image(f'{viz_id}/Fake', ut.return_tensor_images(fake))
+                    self.writer.add_image(f'{viz_id}/Real', ut.return_tensor_images(real))
 
                 self.step += 1
         if gan_id:
             self.save_model(gan_id)
 
+    def compute_discriminator_accuracy(self, real_adv, real_aux, fake_adv, fake_aux, real_classes, fake_classes):
+        fake_adv_label = fake_adv < .5
+        real_adv_label = real_adv > .5
+
+        fake_aux_label = torch.argmax(fake_aux, dim=1) == fake_classes
+        real_aux_label = torch.argmax(real_aux, dim=1) == real_classes
+
+        self.writer.add_scalar('Discriminator/ADV/Fake', float(fake_adv_label.sum()/len(fake_adv_label)), self.step)
+        self.writer.add_scalar('Discriminator/ADV/Real', float(real_adv_label.sum()/len(real_adv_label)), self.step)
+
+        self.writer.add_scalar('Discriminator/AUX/Fake', float(fake_aux_label.sum() / len(fake_aux_label)), self.step)
+        self.writer.add_scalar('Discriminator/AUX/Real', float(real_aux_label.sum() / len(real_aux_label)), self.step)
+
     def save_model(self, gan_id):
         torch.save({
             'step': self.step,
             'z_dim': self.z_dim,
+            'h_params_added': self.h_params_added,
             'generator_state_dict': self.generator.state_dict(),
             'discriminator_state_dict': self.discriminator.state_dict(),
             'generator_optim_state_dict': self.gen_optim.state_dict(),
-            'discriminator_optim_state_dict': self.disc_optim.state_dict()
+            'discriminator_optim_state_dict': self.disc_optim.state_dict(),
         },
             f"data/models/{gan_id}.pth")
 
@@ -131,6 +163,7 @@ class AuxGAN:
 
         self.step = checkpoint['step']
         self.z_dim = checkpoint['z_dim']
+        self.h_params_added = checkpoint['h_params_added']
 
         self.generator.load_state_dict(checkpoint['generator_state_dict'])
         self.discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
@@ -204,4 +237,3 @@ class CondGenerator(nn.Module):
         one_hot = one_hot.view(one_hot.shape + (1, 1))
 
         return torch.cat((noise, one_hot), axis=1)
-
