@@ -25,8 +25,8 @@ class WGAN:
     def __init__(self, params, normal_weight_init=True):
         self.critic = Critic(params["critic"]["n_feature"], params["critic"]["n_channel"],
                              params["n_conv_block"]).to(var.device)
-        self.generator = Generator(params["z_dim"], params["gen"]["n_feature"],
-                                   params["gen"]["n_channel"], params["n_conv_block"]).to(var.device)
+
+        self.generator = self.init_generator(params["generator_type"], params)
 
         self.critic_optim = torch.optim.Adam(self.critic.parameters(),
                                              lr=params['critic']['lr'],
@@ -58,9 +58,26 @@ class WGAN:
 
         self.params = ut.flatten_dict(params)
 
+    @staticmethod
+    def init_generator(generator_type, params):
+
+        if generator_type == 'convtranspose':
+            generator = GeneratorConvTranspose(params["z_dim"], params["gen"]["n_feature"],
+                                               params["gen"]["n_channel"],
+                                               n_conv_block=params["n_conv_block"])
+        elif generator_type == 'upsample':
+            generator = GeneratorUpSample(params["z_dim"], params["gen"]["n_feature"], params["gen"]["n_channel"],
+                                          params["output_size"], n_conv_block=params["n_conv_block"])
+        else:
+            raise NotImplementedError(f'{generator_type} generator type is not available')
+
+        return generator.to(var.device)
+
     def init_tensorboard(self, main_dir='runs', subdir='train', port=8008):
+        main_dir = os.path.join(var.PROJECT_DIR, main_dir)
         os.system(f'tensorboard --logdir={main_dir} --port={port} &')
-        self.writer = SummaryWriter(f'{main_dir}/{subdir}')
+
+        self.writer = SummaryWriter(f'{os.path.join(main_dir, subdir)}')
         if not self.h_params_added:
             # self.writer.add_hparams(self.params, {})  https://github.com/pytorch/pytorch/issues/32651
             self.h_params_added = True
@@ -178,6 +195,7 @@ class WGAN:
             self.save_model(gan_id)
 
     def save_model(self, gan_id):
+        model_path = os.path.join(var.PROJECT_DIR, f"data/models/{gan_id}.pth")
         torch.save({
             'step': self.step,
             'z_dim': self.z_dim,
@@ -190,7 +208,7 @@ class WGAN:
             'generator_optim_state_dict': self.gen_optim.state_dict(),
             'critic_optim_state_dict': self.critic_optim.state_dict()
         },
-            f"data/models/{gan_id}.pth")
+            model_path)
 
     def load_model(self, path, train=True):
         checkpoint = torch.load(path)
@@ -241,9 +259,9 @@ class Critic(nn.Module):
             return self.output(x)
 
 
-class Generator(nn.Module):
+class GeneratorConvTranspose(nn.Module):
     def __init__(self, n_latent, n_features, n_channel, n_conv_block=3):
-        super(Generator, self).__init__()
+        super(GeneratorConvTranspose, self).__init__()
 
         modules = list()
         for layer in reversed(range(n_conv_block)):
@@ -261,3 +279,49 @@ class Generator(nn.Module):
 
     def forward(self, x):
         return self.main(x)
+
+
+class GeneratorUpSample(nn.Module):
+    def __init__(self, z_dim, n_features, n_channel, output_size, n_conv_block=3):
+        super(GeneratorUpSample, self).__init__()
+
+        self.init_size = output_size // (2 ** n_conv_block)  # Initial size before up sampling
+        self.n_feature = n_features
+        self.n_conv_block = n_conv_block
+
+        self.l1 = nn.Sequential(
+            nn.Linear(z_dim, n_features * (2 ** n_conv_block) * self.init_size ** 2)
+        )
+        modules = list()
+        for layer in reversed(range(n_conv_block)):
+            modules.append(ut.generator_layer_up_sample(n_features * (2 ** layer)))
+
+        self.conv_blocks = nn.Sequential(
+            nn.BatchNorm2d(n_features * (2 ** n_conv_block)),
+            nn.Sequential(*modules),
+            nn.Conv2d(n_features, n_channel, 3, stride=1, padding=1),
+            nn.Tanh(),
+        )
+
+    def forward(self, noise):
+        noise = noise.squeeze()
+        out = self.l1(noise)
+        out = out.view(-1, self.n_feature * (2 ** self.n_conv_block),
+                       self.init_size, self.init_size)
+        img = self.conv_blocks(out)
+
+        return img
+
+
+def train(gan_params, data_loader, gan_id, n_epoch):
+    gan = WGAN(gan_params)
+    checkpoint_path = os.path.join(var.PROJECT_DIR, f'data/models/{gan_id}.pth')
+    if os.path.exists(checkpoint_path):
+        print('RESUMING TRAINING...')
+        gan.load_model(checkpoint_path)
+    else:
+        print('NEW TRAINING...')
+    print(f'id: {gan_id}')
+    gan.init_tensorboard(main_dir='runs', subdir=gan_id, port=8008)
+    gan.train(n_epoch=n_epoch, dataloader=data_loader, gan_id=gan_id)
+    print(f"{gan_id} TRAINED FOR {n_epoch}")

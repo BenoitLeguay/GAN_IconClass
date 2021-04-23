@@ -26,13 +26,8 @@ class WACGAN:
         self.aux_nll_loss = nn.NLLLoss()
         self.critic = Critic(params["n_classes"], params["critic"]["n_feature"],
                              params["critic"]["n_channel"], params["n_conv_block"]).to(var.device)
-        """
-        self.generator = CondGenerator(params["n_classes"], params["z_dim"], params["gen"]["n_feature"],
-                                       params["gen"]["n_channel"], params["gen"]["embedding"],
-                                       n_conv_block=params["n_conv_block"]).to(var.device)
-        """
-        self.generator = CondGeneratorColorPicker(params["n_classes"], params["z_dim"]).to(var.device)
 
+        self.generator = self.init_generator(params["generator_type"], params)
         self.critic_optim = torch.optim.Adam(self.critic.parameters(),
                                              lr=params['critic']['lr'],
                                              betas=tuple(params['critic']['betas'].values()))
@@ -64,9 +59,26 @@ class WACGAN:
 
         self.params = ut.flatten_dict(params)
 
+    @staticmethod
+    def init_generator(generator_type, params):
+        if generator_type == 'convtranspose':
+            generator = CondGeneratorConvTrans(params["n_classes"], params["z_dim"], params["gen"]["n_feature"],
+                                               params["gen"]["n_channel"], params["gen"]["embedding"],
+                                               n_conv_block=params["n_conv_block"])
+        elif generator_type == 'upsample':
+            raise NotImplementedError(f'DO IT BENOIT: CondGeneratorUpSample')
+        elif generator_type == 'color_picker':
+            generator = CondGeneratorColorPicker(params["n_classes"], params["z_dim"])
+        else:
+            raise NotImplementedError(f'{generator_type} generator type is not available')
+
+        return generator.to(var.device)
+
     def init_tensorboard(self, main_dir='runs', subdir='train', port=8008):
+        main_dir = os.path.join(var.PROJECT_DIR, main_dir)
         os.system(f'tensorboard --logdir={main_dir} --port={port} &')
-        self.writer = SummaryWriter(f'{main_dir}/{subdir}')
+
+        self.writer = SummaryWriter(f'{os.path.join(main_dir, subdir)}')
         if not self.h_params_added:
             # self.writer.add_hparams(self.params, {})  https://github.com/pytorch/pytorch/issues/32651
             self.h_params_added = True
@@ -196,6 +208,7 @@ class WACGAN:
             self.save_model(gan_id)
 
     def save_model(self, gan_id):
+        model_path = os.path.join(var.PROJECT_DIR, f"data/models/{gan_id}.pth")
         torch.save({
             'step': self.step,
             'z_dim': self.z_dim,
@@ -208,7 +221,7 @@ class WACGAN:
             'generator_optim_state_dict': self.gen_optim.state_dict(),
             'critic_optim_state_dict': self.critic_optim.state_dict()
         },
-            f"data/models/{gan_id}.pth")
+            model_path)
 
     def load_model(self, path, train=True):
         checkpoint = torch.load(path)
@@ -265,9 +278,9 @@ class Critic(nn.Module):
         return adv, aux
 
 
-class CondGenerator(nn.Module):
+class CondGeneratorConvTrans(nn.Module):
     def __init__(self, n_classes, z_dim, n_features, n_channel, embedding=True, n_conv_block=3):
-        super(CondGenerator, self).__init__()
+        super(CondGeneratorConvTrans, self).__init__()
 
         self.n_classes = n_classes
         self.embedding = embedding
@@ -527,3 +540,17 @@ class CondGeneratorColorPicker(nn.Module):
         output = torch.cat((r_space, g_space, b_space), dim=1)
 
         return output
+
+
+def train(gan_params, data_loader, gan_id, n_epoch):
+    gan = WACGAN(gan_params)
+    checkpoint_path = os.path.join(var.PROJECT_DIR, f'data/models/{gan_id}.pth')
+    if os.path.exists(checkpoint_path):
+        print('RESUMING TRAINING...')
+        gan.load_model(checkpoint_path)
+    else:
+        print('NEW TRAINING...')
+    print(f'id: {gan_id}')
+    gan.init_tensorboard(main_dir='runs', subdir=gan_id, port=8008)
+    gan.train(n_epoch=n_epoch, dataloader=data_loader, gan_id=gan_id)
+    print(f"{gan_id} TRAINED FOR {n_epoch}")
