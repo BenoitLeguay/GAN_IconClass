@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from torch.distributions import Categorical
 import variable as var
 import utils as ut
 import os
@@ -49,6 +50,11 @@ class WACGAN:
         self.step = 0
         self.epoch = 0
 
+        self.aux_fake_acc = list()
+        self.aux_real_acc = list()
+        self.fake_aux_entropy = list()
+        self.real_aux_entropy = list()
+
         if normal_weight_init:
             self.critic.apply(ut.weights_init)
             self.generator.apply(ut.weights_init)
@@ -62,9 +68,9 @@ class WACGAN:
     @staticmethod
     def init_generator(generator_type, params):
         if generator_type == 'convtranspose':
-            generator = CondGeneratorConvTrans(params["n_classes"], params["z_dim"], params["gen"]["n_feature"],
-                                               params["gen"]["n_channel"], params["gen"]["embedding"],
-                                               n_conv_block=params["n_conv_block"])
+            generator = CondGeneratorCTrans(params["n_classes"], params["z_dim"], params["gen"]["n_feature"],
+                                            params["gen"]["n_channel"], params["gen"]["embedding"],
+                                            n_conv_block=params["n_conv_block"])
         elif generator_type == 'upsample':
             raise NotImplementedError(f'DO IT BENOIT: CondGeneratorUpSample')
         elif generator_type == 'color_picker':
@@ -144,6 +150,8 @@ class WACGAN:
                        self.aux_nll_loss(fake_aux, fake_classes) +
                        self.aux_nll_loss(real_aux, real_classes)) / 3
 
+        self.compute_critic_metrics(real_aux, fake_aux, real_classes, fake_classes)
+
         critic_loss.backward(retain_graph=True)
         self.critic_optim.step()
 
@@ -201,11 +209,36 @@ class WACGAN:
 
             self.writer.add_scalar('Loss/Critic', critic_epoch_loss / len(dataloader), self.epoch)
             self.writer.add_scalar('Loss/Generator', gen_epoch_loss / len(dataloader), self.epoch)
+            self.add_critic_metrics()
 
             self.epoch += 1
 
         if gan_id:
             self.save_model(gan_id)
+
+    def compute_critic_metrics(self, real_aux, fake_aux, real_classes, fake_classes):
+
+        fake_aux_label = torch.argmax(fake_aux, dim=1) == fake_classes
+        real_aux_label = torch.argmax(real_aux, dim=1) == real_classes
+
+        fake_entropy = (Categorical(probs=fake_aux).entropy()/fake_aux.size(1)).mean().item()
+        real_entropy = (Categorical(probs=real_aux).entropy()/real_aux.size(1)).mean().item()
+        self.aux_fake_acc.extend(fake_aux_label.tolist())
+        self.aux_real_acc.extend(real_aux_label.tolist())
+        self.fake_aux_entropy.append(fake_entropy)
+        self.real_aux_entropy.append(real_entropy)
+
+    def add_critic_metrics(self):
+        self.writer.add_scalar('Critic/AUX/Fake', sum(self.aux_fake_acc) / len(self.aux_fake_acc), self.epoch)
+        self.writer.add_scalar('Critic/AUX/Real', sum(self.aux_real_acc) / len(self.aux_real_acc), self.epoch)
+        self.writer.add_scalar('Critic/AUX/Real Entropy',
+                               sum(self.fake_aux_entropy) / len(self.fake_aux_entropy), self.epoch)
+        self.writer.add_scalar('Critic/AUX/Fake Entropy',
+                               sum(self.real_aux_entropy) / len(self.real_aux_entropy), self.epoch)
+        self.aux_fake_acc.clear()
+        self.aux_real_acc.clear()
+        self.fake_aux_entropy.clear()
+        self.real_aux_entropy.clear()
 
     def save_model(self, gan_id):
         model_path = os.path.join(var.PROJECT_DIR, f"data/models/{gan_id}.pth")
@@ -269,7 +302,6 @@ class Critic(nn.Module):
 
     def forward(self, x):
         conv = self.main(x)
-
         flat = conv.view(-1, self.n_features)
 
         aux = self.softmax(self.fc_aux(flat))
@@ -278,9 +310,9 @@ class Critic(nn.Module):
         return adv, aux
 
 
-class CondGeneratorConvTrans(nn.Module):
+class CondGeneratorCTrans(nn.Module):
     def __init__(self, n_classes, z_dim, n_features, n_channel, embedding=True, n_conv_block=3):
-        super(CondGeneratorConvTrans, self).__init__()
+        super(CondGeneratorCTrans, self).__init__()
 
         self.n_classes = n_classes
         self.embedding = embedding
@@ -329,13 +361,12 @@ class CondGeneratorConvTrans(nn.Module):
 class CondGeneratorColorPicker(nn.Module):
     """A generator for mapping a latent space to a sample space.
     Input shape: (?, latent_dim)
-    Output shape: (?, 3, 96, 96)
+    Output shape: (?, 3, 64, 64)
     """
 
     def __init__(self, n_classes, z_dim):
         """Initialize generator.
         Args:
-            latent_dim (int): latent dimension ("noise vector")
         """
         super().__init__()
         self.z_dim = z_dim
@@ -542,7 +573,39 @@ class CondGeneratorColorPicker(nn.Module):
         return output
 
 
-def train(gan_params, data_loader, gan_id, n_epoch):
+class CondGeneratorUpSample(nn.Module):
+    def __init__(self, z_dim, n_features, n_channel, output_size, n_conv_block=3):
+        super(CondGeneratorUpSample, self).__init__()
+
+        self.init_size = output_size // (2 ** n_conv_block)  # Initial size before up sampling
+        self.n_feature = n_features
+        self.n_conv_block = n_conv_block
+
+        self.l1 = nn.Sequential(
+            nn.Linear(z_dim, n_features * (2 ** n_conv_block) * self.init_size ** 2)
+        )
+        modules = list()
+        for layer in reversed(range(n_conv_block)):
+            modules.append(ut.generator_layer_up_sample(n_features * (2 ** layer)))
+
+        self.conv_blocks = nn.Sequential(
+            nn.BatchNorm2d(n_features * (2 ** n_conv_block)),
+            nn.Sequential(*modules),
+            nn.Conv2d(n_features, n_channel, 3, stride=1, padding=1),
+            nn.Tanh(),
+        )
+
+    def forward(self, noise):
+        noise = noise.squeeze()
+        out = self.l1(noise)
+        out = out.view(-1, self.n_feature * (2 ** self.n_conv_block),
+                       self.init_size, self.init_size)
+        img = self.conv_blocks(out)
+
+        return img
+
+
+def _train(gan_params, data_loader, gan_id, n_epoch):
     gan = WACGAN(gan_params)
     checkpoint_path = os.path.join(var.PROJECT_DIR, f'data/models/{gan_id}.pth')
     if os.path.exists(checkpoint_path):

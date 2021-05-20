@@ -7,6 +7,7 @@ import glob
 import variable as var
 import torchvision.utils as vutils
 import torch
+import shutil
 
 
 def rolling_window(a, window=3):
@@ -147,6 +148,11 @@ def only_numerics(seq):
     return seq_type().join(filter(seq_type.isdigit, seq))
 
 
+def delete_gans_id(gan_id):
+    os.remove(os.path.join(var.PROJECT_DIR, f'data/models/{gan_id}.pth'))
+    shutil.rmtree(os.path.join(var.PROJECT_DIR, f'runs/{gan_id}'))
+
+
 class MinMaxScaler1Neg1(object):
 
     def __init__(self, data_min, data_max):
@@ -193,3 +199,32 @@ class TanhEstimator(object):
 
     def __repr__(self):
         return self.__class__.__name__ + '(max={0}, min={1})'.format(self.max, self.min)
+
+
+"""
+    Average Log-likelihood
+    Coverage Metric
+    Inception Score (IS)
+    Modified Inception Score (m-IS)
+    Mode Score
+    AM Score
+    Frechet Inception Distance (FID)
+    Maximum Mean Discrepancy (MMD)
+    The Wasserstein Critic
+    Birthday Paradox Test
+    Classifier Two-sample Tests (C2ST)
+    Classification Performance
+    Boundary Distortion
+    Number of Statistically-Different Bins (NDB)
+    Image Retrieval Performance
+    Generative Adversarial Metric (GAM)
+    Tournament Win Rate and Skill Rating
+    Normalized Relative Discriminative Score (NRDS)
+    Adversarial Accuracy and Adversarial Divergence
+    Geometry Score
+    Reconstruction Error
+    Image Quality Measures (SSIM, PSNR and Sharpness Difference)
+    Low-level Image Statistics
+    Precision, Recall and F1 Score
+
+"""

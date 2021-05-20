@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+from torch.distributions import Categorical
 import utils as ut
 import variable as var
 from tqdm import tqdm
@@ -52,8 +53,12 @@ class AuxGAN:
                                               n_conv_block=params["n_conv_block"]).to(var.device)
 
         self.generator = self.init_generator(params["generator_type"], params)
+
         self.disc_optim = torch.optim.Adam(self.discriminator.parameters(), lr=params['disc']['lr'],
-                                           betas=tuple(params['disc']['betas'].values()))
+                                                 betas=tuple(params['disc']['betas'].values()))
+        """
+        self.disc_optim = torch.optim.SGD(self.discriminator.parameters(), lr=params['disc']['lr'])
+        """
         self.gen_optim = torch.optim.Adam(self.generator.parameters(), lr=params['gen']['lr'],
                                           betas=tuple(params['gen']['betas'].values()))
 
@@ -70,6 +75,13 @@ class AuxGAN:
         self.step = 0
         self.epoch = 0
 
+        self.adv_fake_acc = list()
+        self.adv_real_acc = list()
+        self.aux_fake_acc = list()
+        self.aux_real_acc = list()
+        self.fake_aux_entropy = list()
+        self.real_aux_entropy = list()
+
         if normal_weight_init:
             self.discriminator.apply(ut.weights_init)
             self.generator.apply(ut.weights_init)
@@ -83,11 +95,13 @@ class AuxGAN:
     @staticmethod
     def init_generator(generator_type, params):
         if generator_type == 'convtranspose':
-            generator = CondGeneratorConvTrans(params["n_classes"], params["z_dim"], params["gen"]["n_feature"],
-                                      params["gen"]["n_channel"], params["gen"]["embedding"],
-                                      n_conv_block=params["n_conv_block"])
+            generator = CondGeneratorCTrans(params["n_classes"], params["z_dim"], params["gen"]["n_feature"],
+                                            params["gen"]["n_channel"], params["gen"]["embedding"],
+                                            n_conv_block=params["n_conv_block"])
         elif generator_type == 'upsample':
-            raise NotImplementedError(f'DO IT BENOIT: CondGeneratorUpSample')
+            generator = CondGeneratorUpSample(params["n_classes"], params["z_dim"], params["gen"]["n_feature"],
+                                              params["gen"]["n_channel"], params["output_size"],
+                                              n_conv_block=params["n_conv_block"])
         elif generator_type == 'color_picker':
             generator = CondGeneratorColorPicker(params["n_classes"], params["z_dim"])
         else:
@@ -118,7 +132,7 @@ class AuxGAN:
 
     def generate_fake(self, n, train=True, being_class=None):
         noise = self.get_random_noise(n)
-        if being_class:
+        if being_class is not None:
             classes = torch.ones((n, ), device=var.device).long() * being_class
         else:
             classes = self.get_random_classes(n)
@@ -138,16 +152,15 @@ class AuxGAN:
         fake_adv, fake_aux = self.discriminator(fake.detach())
         fake_loss = (self.adv_bce_loss(fake_adv, torch.zeros_like(fake_adv)) +
                      self.aux_nll_loss(fake_aux, fake_classes)) / 2
-        fake_loss.backward()
 
         real_adv, real_aux = self.discriminator(real)
-        real_loss = (self.adv_bce_loss(real_adv, self.ground_truth_label(real_adv))
-                     + self.aux_nll_loss(real_aux, real_classes)) / 2
-        real_loss.backward()
+        real_loss = (self.adv_bce_loss(real_adv, self.ground_truth_label(real_adv)) +
+                     self.aux_nll_loss(real_aux, real_classes)) / 2
 
         disc_loss = (fake_loss + real_loss) / 2
+        disc_loss.backward()
 
-        self.compute_discriminator_accuracy(real_adv, real_aux, fake_adv, fake_aux, real_classes, fake_classes)
+        self.compute_discriminator_metrics(real_adv, real_aux, fake_adv, fake_aux, real_classes, fake_classes)
 
         return disc_loss
 
@@ -155,23 +168,14 @@ class AuxGAN:
         fake, fake_classes = self.generate_fake(batch_size)
         fake_adv, fake_aux = self.discriminator(fake)
 
-        loss = (self.adv_bce_loss(fake_adv, self.ground_truth_label(fake_adv)) +
+        loss = (self.adv_bce_loss(fake_adv, torch.ones_like(fake_adv)) +
                 self.aux_nll_loss(fake_aux, fake_classes)) / 2
-
-        """
-        fake_aux_class = torch.gather(fake_aux, 1, fake_classes.unsqueeze(1))
-        loss = torch.sum(
-            torch.mul(
-                self.adv_bce_loss_no_reduction(fake_adv, torch.ones_like(fake_adv)),
-                -torch.log(fake_aux_class))
-        ) + self.aux_nll_loss(fake_aux, fake_classes) * (1/2)
-        """
 
         loss.backward()
 
         return loss
 
-    def train(self, n_epoch, dataloader, gan_id=False):
+    def train(self, n_epoch, dataloader, gan_id=False, aux_fake_acc_threshold=.7):
 
         for _ in tqdm(range(n_epoch)):
             gen_epoch_loss = 0.0
@@ -210,24 +214,51 @@ class AuxGAN:
 
             self.writer.add_scalar('Loss/Discriminator', disc_epoch_loss / len(dataloader), self.epoch)
             self.writer.add_scalar('Loss/Generator', gen_epoch_loss / len(dataloader), self.epoch)
+            aux_fake_acc = self.add_discriminator_metrics()
 
             self.epoch += 1
+            if aux_fake_acc >= aux_fake_acc_threshold:
+                break
 
         if gan_id:
             self.save_model(gan_id)
 
-    def compute_discriminator_accuracy(self, real_adv, real_aux, fake_adv, fake_aux, real_classes, fake_classes):
+    def compute_discriminator_metrics(self, real_adv, real_aux, fake_adv, fake_aux, real_classes, fake_classes):
         fake_adv_label = fake_adv < .5
         real_adv_label = real_adv > .5
 
         fake_aux_label = torch.argmax(fake_aux, dim=1) == fake_classes
         real_aux_label = torch.argmax(real_aux, dim=1) == real_classes
 
-        self.writer.add_scalar('Discriminator/ADV/Fake', float(fake_adv_label.sum()/len(fake_adv_label)), self.step)
-        self.writer.add_scalar('Discriminator/ADV/Real', float(real_adv_label.sum()/len(real_adv_label)), self.step)
+        fake_entropy = (Categorical(probs=fake_aux).entropy()/fake_aux.size(1)).mean().item()
+        real_entropy = (Categorical(probs=real_aux).entropy()/real_aux.size(1)).mean().item()
 
-        self.writer.add_scalar('Discriminator/AUX/Fake', float(fake_aux_label.sum() / len(fake_aux_label)), self.step)
-        self.writer.add_scalar('Discriminator/AUX/Real', float(real_aux_label.sum() / len(real_aux_label)), self.step)
+        self.adv_fake_acc.extend(fake_adv_label.squeeze().tolist())
+        self.adv_real_acc.extend(real_adv_label.squeeze().tolist())
+        self.aux_fake_acc.extend(fake_aux_label.tolist())
+        self.aux_real_acc.extend(real_aux_label.tolist())
+        self.fake_aux_entropy.append(fake_entropy)
+        self.real_aux_entropy.append(real_entropy)
+
+    def add_discriminator_metrics(self):
+        aux_fake_acc = sum(self.aux_fake_acc) / len(self.aux_fake_acc)
+        self.writer.add_scalar('Discriminator/ADV/Fake', sum(self.adv_fake_acc) / len(self.adv_fake_acc), self.epoch)
+        self.writer.add_scalar('Discriminator/ADV/Real', sum(self.adv_real_acc) / len(self.adv_real_acc), self.epoch)
+        self.writer.add_scalar('Discriminator/AUX/Fake', sum(self.aux_fake_acc) / len(self.aux_fake_acc), self.epoch)
+        self.writer.add_scalar('Discriminator/AUX/Real', sum(self.aux_real_acc) / len(self.aux_real_acc), self.epoch)
+        self.writer.add_scalar('Discriminator/AUX/Real Entropy',
+                               sum(self.fake_aux_entropy) / len(self.fake_aux_entropy), self.epoch)
+        self.writer.add_scalar('Discriminator/AUX/Fake Entropy',
+                               sum(self.real_aux_entropy) / len(self.real_aux_entropy), self.epoch)
+
+        self.adv_fake_acc.clear()
+        self.adv_real_acc.clear()
+        self.aux_fake_acc.clear()
+        self.aux_real_acc.clear()
+        self.fake_aux_entropy.clear()
+        self.real_aux_entropy.clear()
+
+        return aux_fake_acc
 
     def save_model(self, gan_id):
         model_path = os.path.join(var.PROJECT_DIR, f"data/models/{gan_id}.pth")
@@ -294,9 +325,9 @@ class AuxDiscriminator(nn.Module):
         return adv, aux
 
 
-class CondGeneratorConvTrans(nn.Module):
+class CondGeneratorCTrans(nn.Module):
     def __init__(self, n_classes, z_dim, n_features, n_channel, embedding=True, n_conv_block=3):
-        super(CondGeneratorConvTrans, self).__init__()
+        super(CondGeneratorCTrans, self).__init__()
 
         self.n_classes = n_classes
         self.embedding = embedding
@@ -327,7 +358,8 @@ class CondGeneratorConvTrans(nn.Module):
     def forward(self, noise, classes):
         if self.embedding:
             em = self.label_emb(classes)
-            em = em.view(em.shape + (1, 1))
+            em = em.view(em.shape + (1, 1))  # check here
+
             x = torch.mul(em, noise)
         else:
             x = self.cat_noise_classes(noise, classes)
@@ -558,7 +590,41 @@ class CondGeneratorColorPicker(nn.Module):
         return output
 
 
-def train(gan_params, data_loader, gan_id, n_epoch):
+class CondGeneratorUpSample(nn.Module):
+    def __init__(self, n_classes, z_dim, n_features, n_channel, output_size, n_conv_block=3):
+        super(CondGeneratorUpSample, self).__init__()
+
+        self.init_size = output_size // (2 ** n_conv_block)  # Initial size before up sampling
+        self.n_feature = n_features
+        self.n_conv_block = n_conv_block
+
+        self.l1 = nn.Linear(z_dim, n_features * (2 ** n_conv_block) * self.init_size ** 2)
+        self.embedding = nn.Embedding(n_classes, z_dim)
+
+        modules = list()
+        for layer in reversed(range(n_conv_block)):
+            modules.append(ut.generator_layer_up_sample(n_features * (2 ** layer)))
+
+        self.conv_blocks = nn.Sequential(
+            nn.BatchNorm2d(n_features * (2 ** n_conv_block)),
+            nn.Sequential(*modules),
+            nn.Conv2d(n_features, n_channel, 3, stride=1, padding=1),
+            nn.Tanh(),
+        )
+
+    def forward(self, noises, classes):
+        em = self.embedding(classes)
+        em = em.view(em.shape + (1, 1))  # check here
+        x = torch.mul(em, noises)
+        out = self.l1(x.squeeze())
+        out = out.view(-1, self.n_feature * (2 ** self.n_conv_block),
+                       self.init_size, self.init_size)
+        img = self.conv_blocks(out)
+
+        return img
+
+
+def _train(gan_params, data_loader, gan_id, n_epoch):
     gan = AuxGAN(gan_params)
     checkpoint_path = os.path.join(var.PROJECT_DIR, f'data/models/{gan_id}.pth')
     if os.path.exists(checkpoint_path):

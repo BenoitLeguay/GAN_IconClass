@@ -15,7 +15,6 @@ class DCGAN:
                                            n_conv_block=params["n_conv_block"]).to(var.device)
 
         self.generator = self.init_generator(params["generator_type"], params)
-
         self.disc_optim = torch.optim.Adam(self.discriminator.parameters(), lr=params['disc']['lr'],
                                            betas=tuple(params['disc']['betas'].values()))
         self.gen_optim = torch.optim.Adam(self.generator.parameters(), lr=params['gen']['lr'],
@@ -23,6 +22,7 @@ class DCGAN:
         self.z_dim = params['z_dim']
         self.use_inception = params["use_inception"]
         self.label_smoothing = params["label_smoothing"]
+        self.noise_distrib = params["noise_distrib"]
 
         if self.use_inception:
             self.inception = InceptionV3()
@@ -31,6 +31,9 @@ class DCGAN:
         self.h_params_added = False
         self.step = 0
         self.epoch = 0
+
+        self.adv_real_acc = list()
+        self.adv_fake_acc = list()
 
         if normal_weight_init:
             self.discriminator.apply(ut.weights_init)
@@ -46,7 +49,7 @@ class DCGAN:
     def init_generator(generator_type, params):
 
         if generator_type == 'convtranspose':
-            generator = GeneratorConvTranspose(params["z_dim"], params["gen"]["n_feature"],
+            generator = GeneratorCTranspose(params["z_dim"], params["gen"]["n_feature"],
                                                params["gen"]["n_channel"],
                                                n_conv_block=params["n_conv_block"])
         elif generator_type == 'upsample':
@@ -67,7 +70,10 @@ class DCGAN:
             self.h_params_added = True
 
     def get_random_noise(self, n):
-        return torch.randn(n, self.z_dim, 1, 1, device=var.device)
+        if self.noise_distrib == 'gaussian':
+            return torch.randn(n, self.z_dim, 1, 1, device=var.device)
+        elif self.noise_distrib == 'uniform':
+            return -2 * torch.rand(n, self.z_dim, 1, 1, device=var.device) + 1
 
     def ground_truth_label(self, shape_like_tensor, smoothing_value=.9):
         ground_truth = torch.ones_like(shape_like_tensor)
@@ -107,7 +113,7 @@ class DCGAN:
         fake = self.generator(noise)
 
         fake_pred = self.discriminator(fake)
-        loss = self.bce_loss(fake_pred, self.ground_truth_label(fake_pred))
+        loss = self.bce_loss(fake_pred, torch.ones_like(fake_pred))
 
         return loss
 
@@ -150,6 +156,12 @@ class DCGAN:
 
             self.writer.add_scalar('Loss/Discriminator', disc_epoch_loss / len(dataloader), self.epoch)
             self.writer.add_scalar('Loss/Generator', gen_epoch_loss / len(dataloader), self.epoch)
+            self.writer.add_scalar('Discriminator/ADV/Fake', sum(self.adv_fake_acc) / len(self.adv_fake_acc),
+                                   self.epoch)
+            self.writer.add_scalar('Discriminator/ADV/Real', sum(self.adv_real_acc) / len(self.adv_real_acc),
+                                   self.epoch)
+            self.adv_fake_acc.clear()
+            self.adv_real_acc.clear()
 
             self.epoch += 1
 
@@ -160,8 +172,8 @@ class DCGAN:
         fake_adv_label = fake_adv < .5
         real_adv_label = real_adv > .5
 
-        self.writer.add_scalar('D-Accuracy/Fake', float(fake_adv_label.sum()/len(fake_adv_label)), self.step)
-        self.writer.add_scalar('D-Accuracy/Real', float(real_adv_label.sum()/len(real_adv_label)), self.step)
+        self.adv_fake_acc.extend(fake_adv_label.squeeze().tolist())
+        self.adv_real_acc.extend(real_adv_label.squeeze().tolist())
 
     def save_model(self, gan_id):
         model_path = os.path.join(var.PROJECT_DIR, f"data/models/{gan_id}.pth")
@@ -216,9 +228,9 @@ class Discriminator(nn.Module):
         return self.main(image)
 
 
-class GeneratorConvTranspose(nn.Module):
+class GeneratorCTranspose(nn.Module):
     def __init__(self, z_dim, n_features, n_channel, n_conv_block=3):
-        super(GeneratorConvTranspose, self).__init__()
+        super(GeneratorCTranspose, self).__init__()
 
         modules = list()
         for layer in reversed(range(n_conv_block)):

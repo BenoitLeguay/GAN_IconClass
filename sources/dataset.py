@@ -185,6 +185,7 @@ class PokemonGensDataset(torch.utils.data.Dataset):
         # n_item dataset reduction (for unit test)
         if n_item:
             self.images = np.random.choice(self.images, size=(n_item, )).tolist() * (1000//n_item)
+            self.update_labels_n_item()
 
     def __len__(self):
         return len(self.images)
@@ -273,6 +274,13 @@ class PokemonGensDataset(torch.utils.data.Dataset):
         # remove image path from self.images that has no label
         filtered_images_path = [path for path, _ in self.path_to_pok_num.items()]
         self.images = filtered_images_path
+
+    def update_labels_n_item(self):
+        n_item_label_id_map = {self.path_to_label_id[im_path]: idx for idx, im_path in enumerate(np.unique(self.images))}
+        self.path_to_label_id = {k: n_item_label_id_map[v] for k, v in self.path_to_label_id.items()
+                                 if k in self.images}
+        self.label_id_to_label_name = {n_item_label_id_map[k]: v for k, v in self.label_id_to_label_name.items()
+                                       if k in n_item_label_id_map.keys()}
 
     def describe(self):
         return {
