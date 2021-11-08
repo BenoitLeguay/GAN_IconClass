@@ -23,13 +23,15 @@ I try a Wasserstein GAN with Gradient Penalty. Below you can see the network arc
 ```python
 {	
 	'gen': {'n_feature': 64, 
-			'n_channel': 1, 
-			'lr': 0.0001, 
-			'betas': (0.9, 0.999)},
- 	'critic': {	'n_channel': 1, 
-               	'n_feature': 64,
-  		'lr': 0.0001, 
-               	'betas': (0.9, 0.999)},
+		'n_channel': 1, 
+		'lr': 0.0001, 
+		'betas': (0.9, 0.999)
+		},
+ 	'critic': {'n_channel': 1,
+		   'n_feature': 64,
+  		   'lr': 0.0001, 
+               	   'betas': (0.9, 0.999)
+		  },
  	'z_dim': 50,
  	'gradient_penalty_factor': 2,
 }
