@@ -10,7 +10,7 @@ Firstly we will work on initial dataset. They are gray-scale images of decorated
 
 ![image-20210218163403957](data/photos/image-20210218163403957.png)
 
-The task can be tricky due to the variance among the letter position, style and size. We would like our GAN to output real letters with decoration around and text in the background. We do not have any labeled on these photos.
+The task can be tricky due to the variance among the letter position, style and size. We would like our GAN to output real letters with decoration around and text in the background. We do not have any label on these photos.
 
 **Dataset size: 3000 examples**
 
@@ -28,7 +28,7 @@ I try a Wasserstein GAN with Gradient Penalty. Below you can see the network arc
 			'betas': (0.9, 0.999)},
  	'critic': {	'n_channel': 1, 
                	'n_feature': 64,
-  				'lr': 0.0001, 
+  		'lr': 0.0001, 
                	'betas': (0.9, 0.999)},
  	'z_dim': 50,
  	'gradient_penalty_factor': 2,
